@@ -262,4 +262,137 @@ var _ = Describe("VSphere Provider Config", Label("vSphereProviderConfig"), func
 			Expect(expected).To(Equal(v1.VSphereFailureDomain{}))
 		})
 	})
+
+	// OCPBUGS-73867: when the datacenter path starts with a slash (e.g. "/nested-dc01"),
+	// InjectFailureDomain must not produce a double-slash Folder, and ExtractFailureDomain
+	// must find the failure domain regardless of whether the stored datacenter has the
+	// leading slash or not.
+	Context("when vCenter datacenter path begins with a leading slash", func() {
+		const infraName = "vsphere-test"
+
+		var leadingSlashInfra *configv1.Infrastructure
+
+		BeforeEach(func() {
+			leadingSlashInfra = configv1resourcebuilder.Infrastructure().AsVSphereWithFailureDomains(infraName, &[]configv1.VSpherePlatformFailureDomainSpec{
+				{
+					Name:   "us-central1-a",
+					Region: "us-central",
+					Zone:   "1-a",
+					Server: "vcenter.test.com",
+					Topology: configv1.VSpherePlatformTopology{
+						Datacenter:     "/nested-dc01",
+						ComputeCluster: "/nested-dc01/host/test-cluster-1",
+						Networks:       []string{"test-network-1"},
+						Datastore:      "/nested-dc01/datastore/test-datastore-1",
+						ResourcePool:   "/nested-dc01/host/test-cluster-1/Resources",
+					},
+				},
+			}).Build()
+		})
+
+		Context("InjectFailureDomain", func() {
+			It("produces a Folder without a double slash", func() {
+				cfg := VSphereProviderConfig{
+					providerConfig: machinev1beta1.VSphereMachineProviderSpec{
+						Workspace: &machinev1beta1.Workspace{
+							Server:       "vcenter.test.com",
+							Datacenter:   "/nested-dc01",
+							Datastore:    "/nested-dc01/datastore/test-datastore-1",
+							ResourcePool: "/nested-dc01/host/test-cluster-1/Resources",
+							Folder:       "/nested-dc01/vm/" + infraName,
+						},
+					},
+					infrastructure: leadingSlashInfra,
+					logger:         logger.Logger(),
+				}
+
+				fd := v1.VSphereFailureDomain{Name: "us-central1-a"}
+				result, err := cfg.InjectFailureDomain(fd)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(result.providerConfig.Workspace.Folder).To(Equal("/nested-dc01/vm/"+infraName),
+					"Folder must not contain a double slash when Datacenter starts with /")
+			})
+
+			It("produces no spurious Diff against an existing machine with a single-slash Folder", func() {
+				// Template computed by InjectFailureDomain when no topology.Template is set:
+				// "<infraName>-rhcos-<region>-<zone>"
+				expectedTemplate := infraName + "-rhcos-us-central-1-a"
+
+				// Simulates the state stored by the installer: datacenter with leading slash,
+				// folder correctly formed with a single slash.
+				existingSpec := machinev1beta1.VSphereMachineProviderSpec{
+					Workspace: &machinev1beta1.Workspace{
+						Server:       "vcenter.test.com",
+						Datacenter:   "/nested-dc01",
+						Datastore:    "/nested-dc01/datastore/test-datastore-1",
+						ResourcePool: "/nested-dc01/host/test-cluster-1/Resources",
+						Folder:       "/nested-dc01/vm/" + infraName,
+					},
+					Network: machinev1beta1.NetworkSpec{
+						Devices: []machinev1beta1.NetworkDeviceSpec{
+							{NetworkName: "test-network-1"},
+						},
+					},
+					Template: expectedTemplate,
+				}
+
+				cfg := VSphereProviderConfig{
+					providerConfig: existingSpec,
+					infrastructure: leadingSlashInfra,
+					logger:         logger.Logger(),
+				}
+
+				fd := v1.VSphereFailureDomain{Name: "us-central1-a"}
+				desired, err := cfg.InjectFailureDomain(fd)
+				Expect(err).ToNot(HaveOccurred())
+
+				diffs, err := cfg.Diff(desired.providerConfig)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(diffs).To(BeEmpty(),
+					"Diff must be empty: leading-slash Datacenter must not trigger a spurious rollout")
+			})
+		})
+
+		Context("ExtractFailureDomain", func() {
+			It("matches when the machine workspace has the datacenter without a leading slash", func() {
+				// Some installs store the datacenter without the slash even when install-config
+				// used one. ExtractFailureDomain must still find the right failure domain.
+				cfg := VSphereProviderConfig{
+					providerConfig: machinev1beta1.VSphereMachineProviderSpec{
+						Workspace: &machinev1beta1.Workspace{
+							Server:       "vcenter.test.com",
+							Datacenter:   "nested-dc01", // no leading slash
+							Datastore:    "/nested-dc01/datastore/test-datastore-1",
+							ResourcePool: "/nested-dc01/host/test-cluster-1/Resources",
+						},
+					},
+					infrastructure: leadingSlashInfra,
+					logger:         logger.Logger(),
+				}
+
+				result := cfg.ExtractFailureDomain()
+				Expect(result).To(Equal(v1.VSphereFailureDomain{Name: "us-central1-a"}),
+					"ExtractFailureDomain must match even when stored Datacenter lacks the leading slash")
+			})
+
+			It("matches when the machine workspace has the datacenter with a leading slash", func() {
+				cfg := VSphereProviderConfig{
+					providerConfig: machinev1beta1.VSphereMachineProviderSpec{
+						Workspace: &machinev1beta1.Workspace{
+							Server:       "vcenter.test.com",
+							Datacenter:   "/nested-dc01", // with leading slash
+							Datastore:    "/nested-dc01/datastore/test-datastore-1",
+							ResourcePool: "/nested-dc01/host/test-cluster-1/Resources",
+						},
+					},
+					infrastructure: leadingSlashInfra,
+					logger:         logger.Logger(),
+				}
+
+				result := cfg.ExtractFailureDomain()
+				Expect(result).To(Equal(v1.VSphereFailureDomain{Name: "us-central1-a"}),
+					"ExtractFailureDomain must match when stored Datacenter has a leading slash")
+			})
+		})
+	})
 })
