@@ -79,7 +79,9 @@ func (v VSphereProviderConfig) getWorkspaceFromFailureDomain(failureDomain *conf
 	if len(topology.Folder) > 0 {
 		workspace.Folder = topology.Folder
 	} else {
-		workspace.Folder = fmt.Sprintf("/%s/vm/%s", workspace.Datacenter, v.infrastructure.Status.InfrastructureName)
+		// path.Join normalizes the result, so a Datacenter that already starts with "/"
+		// (e.g. "/nested-dc01") does not produce a double-slash folder path. (OCPBUGS-73867)
+		workspace.Folder = path.Join("/", workspace.Datacenter, "vm", v.infrastructure.Status.InfrastructureName)
 	}
 
 	if failureDomain.ZoneAffinity != nil {
@@ -191,8 +193,10 @@ func (v VSphereProviderConfig) ExtractFailureDomain() machinev1.VSphereFailureDo
 			}
 		}
 
-		if workspace.Datacenter == topology.Datacenter &&
-			workspace.Datastore == topology.Datastore &&
+		// path.Join normalizes leading slashes, so "/nested-dc01" and "nested-dc01" compare
+		// equal — both vSphere path forms refer to the same object. (OCPBUGS-73867)
+		if path.Join("/", workspace.Datacenter) == path.Join("/", topology.Datacenter) &&
+			path.Join("/", workspace.Datastore) == path.Join("/", topology.Datastore) &&
 			workspace.Server == failureDomain.Server &&
 			workspace.VMGroup == vmGroup &&
 			path.Clean(workspace.ResourcePool) == path.Clean(topology.ResourcePool) {
